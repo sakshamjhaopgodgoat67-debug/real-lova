@@ -1,0 +1,6 @@
+gradio
+groq
+duckduckgo-search
+numpy
+edge-tts
+scipy
