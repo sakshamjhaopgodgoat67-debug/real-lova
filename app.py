@@ -10,9 +10,6 @@ from groq import Groq
 from duckduckgo_search import DDGS
 import edge_tts
 
-# ======================
-# CONFIG
-# ======================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -45,10 +42,6 @@ COMMANDS = {
     "lova": "https://lova-gtf7.onrender.com",
 }
 
-# ======================
-# REVIEWS
-# ======================
-
 def load_reviews():
     try:
         if os.path.exists(REVIEWS_FILE):
@@ -58,7 +51,6 @@ def load_reviews():
         pass
     return []
 
-
 def save_reviews(reviews):
     try:
         with open(REVIEWS_FILE, "w", encoding="utf-8") as f:
@@ -66,10 +58,9 @@ def save_reviews(reviews):
     except Exception:
         pass
 
-
 def submit_review(stars, comment, name):
     if not stars:
-        return "Please select a star rating (1 to 5).", format_reviews()
+        return "Please select stars from 1 to 5.", format_reviews()
     reviews = load_reviews()
     reviews.insert(0, {
         "stars": int(stars),
@@ -77,25 +68,25 @@ def submit_review(stars, comment, name):
         "name": (name or "").strip() or "Anonymous",
         "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
     })
-    reviews = reviews[:50]
-    save_reviews(reviews)
-    return "Thank you for your review!", format_reviews()
-
+    save_reviews(reviews[:50])
+    return "✅ Thank you for your review!", format_reviews()
 
 def format_reviews():
     reviews = load_reviews()
     if not reviews:
-        return "_No reviews yet. Be the first!_"
-    lines = []
-    for r in reviews[:15]:
+        return "<span style='color:#888'>No reviews yet. Be the first to rate Lova.</span>"
+    html = ""
+    for r in reviews[:12]:
         stars = "★" * r["stars"] + "☆" * (5 - r["stars"])
-        lines.append(f"**{stars}** — **{r['name']}** ({r['time']})\n{r['comment']}\n")
-    return "\n".join(lines)
-
-
-# ======================
-# CORE AI
-# ======================
+        html += f"""
+        <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
+        border-radius:14px;padding:14px 16px;margin-bottom:10px;">
+            <div style="color:#ffd35a;font-size:1.05rem;">{stars}</div>
+            <div style="color:#fff;margin-top:6px;">{r['comment']}</div>
+            <div style="color:#777;font-size:0.8rem;margin-top:6px;">{r['name']} · {r['time']}</div>
+        </div>
+        """
+    return html
 
 def find_open_command(text):
     if not text:
@@ -103,11 +94,10 @@ def find_open_command(text):
     t = text.lower().strip()
     for name, url in COMMANDS.items():
         for p in [f"open {name}", f"open the {name}", f"{name} kholo", f"kholo {name}",
-                  f"{name} open karo", f"launch {name}", f"start {name}"]:
+                  f"launch {name}", f"start {name}"]:
             if p in t:
                 return name, url
     return None, None
-
 
 def search_web(query):
     try:
@@ -118,7 +108,6 @@ def search_web(query):
         return "\n\n".join([f"{i}. {r['title']}\n{r['body']}" for i, r in enumerate(results, 1)])
     except Exception as e:
         return f"Search error: {str(e)}"
-
 
 def transcribe_audio(audio):
     if audio is None:
@@ -136,20 +125,27 @@ def transcribe_audio(audio):
             path = f.name
         with open(path, "rb") as file:
             tr = client.audio.transcriptions.create(
-                file=(path, file.read()),
-                model="whisper-large-v3",
-                language=None
+                file=(path, file.read()), model="whisper-large-v3", language=None
             )
         os.unlink(path)
         return tr.text.strip()
     except Exception as e:
         return f"Transcription error: {str(e)}"
 
-
 def is_mostly_hindi(text):
-    hindi = set("अआइईउऊऋएऐओऔकखगघचछजझटठडढणतथदधनपफबभमयरलवशषसहक्षत्रज्ञड़ढ़")
+    hindi = set("अआइईउऊऋएऐओऔकखगघचछजझटठडढणतथदधनपफबभमयरलवशषसह")
     return sum(1 for c in text if c in hindi) >= 3
 
+def format_history():
+    if not chat_history:
+        return "No messages yet. Try saying **open Grok** or record your voice."
+    out = ""
+    for m in chat_history[-12:]:
+        if m["role"] == "user":
+            out += f"**You:** {m['content']}\n\n"
+        else:
+            out += f"**Lova:** {m['content']}\n\n"
+    return out
 
 def ask_llm(user_text):
     global chat_history
@@ -161,43 +157,28 @@ def ask_llm(user_text):
     name, url = find_open_command(user_text)
     if name and url:
         reply = f"Opening {name.capitalize()} for you."
-        chat_history.append({"role": "user", "content": user_text})
-        chat_history.append({"role": "assistant", "content": reply})
-        html = f'<script>window.open("{url}", "_blank");</script><p>Opening <a href="{url}" target="_blank">{name}</a>...</p>'
+        chat_history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
+        html = f'<script>window.open("{url}", "_blank");</script><p style="color:#7dd3fc">Opening <a href="{url}" target="_blank" style="color:#38bdf8">{name}</a>...</p>'
         return reply, format_history(), html
 
-    keywords = ["who", "what", "when", "where", "stock", "price", "news", "weather",
-                "current", "latest", "today", "kya", "kaun", "kab", "kahan", "kaise", "kyun"]
-    extra = search_web(user_text) if any(k in user_text.lower() for k in keywords) else ""
-
+    keys = ["who","what","when","where","stock","price","news","weather","current","latest","today","kya","kaun","kab","kahan"]
+    extra = search_web(user_text) if any(k in user_text.lower() for k in keys) else ""
     messages = [{
         "role": "system",
-        "content": "You are Lova, a helpful AI created by Saksham Jha. Reply in the user's language (English or Hindi). Keep replies short."
+        "content": "You are Lova, a stylish helpful AI created by Saksham Jha. Reply in the user's language. Keep replies short and natural."
+    }] + chat_history[-6:] + [{
+        "role": "user",
+        "content": f"User: {user_text}\n\nInfo:\n{extra}\n\nAnswer:" if extra else user_text
     }]
-    messages.extend(chat_history[-6:])
-    messages.append({"role": "user", "content": f"User: {user_text}\n\nInfo:\n{extra}\n\nAnswer:" if extra else user_text})
-
     try:
         r = client.chat.completions.create(messages=messages, model="openai/gpt-oss-20b")
         reply = r.choices[0].message.content.strip()
     except Exception as e:
         reply = f"Sorry, error: {str(e)}"
-
-    chat_history.append({"role": "user", "content": user_text})
-    chat_history.append({"role": "assistant", "content": reply})
+    chat_history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
     return reply, format_history(), None
 
-
-def format_history():
-    if not chat_history:
-        return "No messages yet. Try: **open Grok** or record your voice."
-    return "\n\n".join([
-        f"**{'You' if m['role']=='user' else 'Lova'}:** {m['content']}"
-        for m in chat_history
-    ])
-
-
-async def text_to_speech(text, voice=None):
+async def tts(text, voice=None):
     try:
         if voice is None:
             voice = "hi-IN-SwaraNeural" if is_mostly_hindi(text) else "en-US-AriaNeural"
@@ -208,171 +189,148 @@ async def text_to_speech(text, voice=None):
     except Exception:
         return None
 
-
-def make_welcome_audio():
-    return asyncio.run(text_to_speech(WELCOME_TEXT, voice="en-US-AriaNeural"))
-
-
 def start_app():
-    """After welcome: show main UI + play welcome audio"""
-    audio = make_welcome_audio()
-    return (
-        gr.update(visible=False),  # welcome panel hide
-        gr.update(visible=True),   # main panel show
-        audio,
-        format_reviews(),
-    )
-
+    audio = asyncio.run(tts(WELCOME_TEXT, voice="en-US-AriaNeural"))
+    return gr.update(visible=False), gr.update(visible=True), audio, format_reviews()
 
 def process_voice(audio):
     user_text = transcribe_audio(audio)
     if not user_text:
         return "", "I couldn't hear you.", format_history(), None, ""
     reply, hist, html = ask_llm(user_text)
-    voice = asyncio.run(text_to_speech(reply))
-    return user_text, reply, hist, voice, html or ""
-
+    return user_text, reply, hist, asyncio.run(tts(reply)), html or ""
 
 def process_text(user_text):
     reply, hist, html = ask_llm(user_text)
-    voice = asyncio.run(text_to_speech(reply))
-    return reply, hist, voice, html or ""
-
+    return reply, hist, asyncio.run(tts(reply)), html or ""
 
 def clear_chat():
     global chat_history
     chat_history = []
     return "", "", "Chat cleared.", None, ""
 
-
-# ======================
-# UI - Black & White + Welcome
-# ======================
-
+# ========== STYLISH CSS ==========
 css = """
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
 .gradio-container {
     max-width: 100% !important;
+    min-height: 100vh !important;
     padding: 0 !important;
-    background: #0a0a0a !important;
-    color: #f5f5f5 !important;
-    font-family: 'Segoe UI', system-ui, sans-serif !important;
+    background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(56,189,248,0.18), transparent 50%),
+        radial-gradient(900px 500px at 100% 0%, rgba(167,139,250,0.15), transparent 45%),
+        linear-gradient(180deg, #070b14 0%, #0b1220 100%) !important;
+    font-family: 'Space Grotesk', system-ui, sans-serif !important;
+    color: #e8eef8 !important;
 }
-footer { display: none !important; }
-.bw-card {
-    background: #111 !important;
-    border: 1px solid #333 !important;
-    border-radius: 16px !important;
-    padding: 20px !important;
+footer {display:none !important;}
+
+.main-wrap {padding: 28px 20px 40px; max-width: 1100px; margin: 0 auto;}
+
+.glass {
+    background: rgba(255,255,255,0.04) !important;
+    border: 1px solid rgba(255,255,255,0.08) !important;
+    border-radius: 20px !important;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 10px 40px rgba(0,0,0,0.35);
 }
-button.primary {
-    background: #fff !important;
-    color: #000 !important;
-    border-radius: 999px !important;
+
+button.primary, .start-btn button {
+    background: linear-gradient(135deg, #38bdf8, #818cf8) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 14px !important;
     font-weight: 600 !important;
-}
-.welcome-face {
-    font-size: 72px;
-    line-height: 1.2;
-    text-align: center;
-    animation: pop 0.6s ease;
-}
-@keyframes pop {
-    0% { transform: scale(0.3); opacity: 0; }
-    70% { transform: scale(1.1); }
-    100% { transform: scale(1); opacity: 1; }
+    box-shadow: 0 8px 24px rgba(56,189,248,0.25) !important;
 }
 """
 
 with gr.Blocks(title="Lova AI", css=css, theme=gr.themes.Base()) as demo:
 
-    # ---------- WELCOME SCREEN ----------
-    with gr.Column(visible=True) as welcome_panel:
-        gr.HTML(
-            """
-            <div style="min-height:70vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:40px;background:#0a0a0a;color:#fff;">
-                <div class="welcome-face">😊</div>
-                <h1 style="margin:16px 0 8px;font-size:2.4rem;letter-spacing:2px;">LOVA</h1>
-                <p style="color:#aaa;max-width:420px;margin-bottom:24px;">
-                    Smart Voice AI Assistant by <b>Saksham Jha</b>
-                </p>
-                <p style="color:#888;max-width:480px;font-size:0.95rem;">
-                    Tap below to start. Lova will greet you and explain how to use the app.
-                </p>
-            </div>
-            """
-        )
-        start_btn = gr.Button("Start Lova", variant="primary", size="lg")
+    # WELCOME
+    with gr.Column(visible=True, elem_classes=["main-wrap"]) as welcome_panel:
+        gr.HTML("""
+        <div style="min-height:75vh;display:flex;align-items:center;justify-content:center;">
+          <div style="width:min(440px,92vw);text-align:center;padding:40px 28px;
+            background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);
+            border-radius:28px;box-shadow:0 20px 60px rgba(0,0,0,0.45);
+            backdrop-filter:blur(16px);">
+            <div style="width:92px;height:92px;margin:0 auto 18px;border-radius:28px;
+              background:linear-gradient(135deg,#38bdf8,#a78bfa);display:flex;align-items:center;
+              justify-content:center;font-size:48px;box-shadow:0 12px 40px rgba(56,189,248,0.35);
+              animation:floaty 3s ease-in-out infinite;">✨</div>
+            <h1 style="margin:0;font-size:2.6rem;letter-spacing:4px;
+              background:linear-gradient(90deg,#fff,#93c5fd);-webkit-background-clip:text;
+              -webkit-text-fill-color:transparent;">LOVA</h1>
+            <p style="color:#9fb0c7;margin:10px 0 6px;font-size:1.05rem;">Smart Voice AI Assistant</p>
+            <p style="color:#6b7c93;margin:0 0 22px;font-size:0.92rem;">Created by Saksham Jha</p>
+            <p style="color:#8494aa;font-size:0.9rem;line-height:1.55;margin:0 0 8px;">
+              Tap start to meet Lova. She’ll greet you and show how to use voice, chat, and commands.
+            </p>
+          </div>
+        </div>
+        <style>
+        @keyframes floaty {0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+        </style>
+        """)
+        with gr.Row(elem_classes=["start-btn"]):
+            start_btn = gr.Button("Start Lova →", variant="primary", size="lg")
 
     welcome_audio = gr.Audio(visible=False, autoplay=True)
 
-    # ---------- MAIN APP ----------
-    with gr.Column(visible=False) as main_panel:
-        gr.HTML(
-            """
-            <div style="padding:20px 20px 8px;border-bottom:1px solid #222;background:#0a0a0a;">
-                <h2 style="margin:0;color:#fff;letter-spacing:3px;">LOVA</h2>
-                <p style="margin:4px 0 0;color:#888;font-size:0.9rem;">Voice · Chat · Commands · by Saksham Jha</p>
+    # MAIN APP
+    with gr.Column(visible=False, elem_classes=["main-wrap"]) as main_panel:
+        gr.HTML("""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+          margin-bottom:18px;padding:16px 18px;border-radius:18px;
+          background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div style="width:42px;height:42px;border-radius:14px;
+              background:linear-gradient(135deg,#38bdf8,#a78bfa);display:flex;
+              align-items:center;justify-content:center;">✨</div>
+            <div>
+              <div style="font-weight:700;font-size:1.25rem;letter-spacing:2px;">LOVA</div>
+              <div style="color:#7f8ea3;font-size:0.8rem;">Voice · Chat · Commands</div>
             </div>
-            """
-        )
+          </div>
+          <div style="color:#6b7c93;font-size:0.8rem;">by Saksham Jha</div>
+        </div>
+        """)
 
-        with gr.Tabs():
-            with gr.Tab("🎤 Voice"):
-                gr.Markdown("**Record** → then press **Send**")
-                audio_input = gr.Audio(sources=["microphone"], type="numpy", label="Record", format="wav")
-                user_said = gr.Textbox(label="You said", interactive=False)
-                voice_send = gr.Button("Send", variant="primary")
+        with gr.Row():
+            with gr.Column(scale=5):
+                with gr.Tab("🎤 Voice"):
+                    gr.Markdown("Record your voice, then press **Send**")
+                    audio_input = gr.Audio(sources=["microphone"], type="numpy", label="Microphone", format="wav")
+                    user_said = gr.Textbox(label="You said", interactive=False)
+                    voice_send = gr.Button("Send", variant="primary")
+                with gr.Tab("💬 Chat"):
+                    text_input = gr.Textbox(label="Message or command", placeholder="Try: open Grok", lines=3)
+                    text_send = gr.Button("Send", variant="primary")
+                with gr.Tab("⭐ Reviews"):
+                    gr.Markdown("Rate Lova and leave a compliment or suggestion")
+                    with gr.Row():
+                        rev_name = gr.Textbox(label="Name", placeholder="Optional")
+                        rev_stars = gr.Radio(["1","2","3","4","5"], label="Stars", value="5")
+                    rev_comment = gr.Textbox(label="Your review", lines=3, placeholder="What should improve?")
+                    rev_btn = gr.Button("Submit review", variant="primary")
+                    rev_status = gr.Markdown()
+                    rev_list = gr.HTML(format_reviews())
 
-            with gr.Tab("💬 Text"):
-                text_input = gr.Textbox(label="Message or command", placeholder="e.g. open Grok / hello", lines=2)
-                text_send = gr.Button("Send", variant="primary")
+            with gr.Column(scale=5):
+                history_box = gr.Markdown("Conversation will appear here.")
+                reply_box = gr.Textbox(label="Lova's reply", lines=4)
+                audio_output = gr.Audio(label="Lova's voice", autoplay=True)
+                open_box = gr.HTML()
+                clear_btn = gr.Button("Clear chat")
 
-            with gr.Tab("⭐ Review"):
-                gr.Markdown("Rate Lova and leave a suggestion")
-                with gr.Row():
-                    rev_name = gr.Textbox(label="Your name", placeholder="Optional")
-                    rev_stars = gr.Radio(choices=["1", "2", "3", "4", "5"], label="Stars", value="5")
-                rev_comment = gr.Textbox(label="Compliment or suggestion", lines=3, placeholder="What did you like? What can improve?")
-                rev_btn = gr.Button("Submit review", variant="primary")
-                rev_status = gr.Markdown("")
-                rev_list = gr.Markdown(format_reviews())
-
-        history_box = gr.Markdown("No messages yet.")
-        reply_box = gr.Textbox(label="Lova's Reply", lines=3)
-        audio_output = gr.Audio(label="Lova's Voice", autoplay=True)
-        open_box = gr.HTML()
-        clear_btn = gr.Button("Clear chat")
-
-    # ---------- EVENTS ----------
-    start_btn.click(
-        fn=start_app,
-        outputs=[welcome_panel, main_panel, welcome_audio, rev_list]
-    )
-
-    voice_send.click(
-        fn=process_voice,
-        inputs=audio_input,
-        outputs=[user_said, reply_box, history_box, audio_output, open_box]
-    )
-    text_send.click(
-        fn=process_text,
-        inputs=text_input,
-        outputs=[reply_box, history_box, audio_output, open_box]
-    )
-    text_input.submit(
-        fn=process_text,
-        inputs=text_input,
-        outputs=[reply_box, history_box, audio_output, open_box]
-    )
-    clear_btn.click(
-        fn=clear_chat,
-        outputs=[user_said, reply_box, history_box, audio_output, open_box]
-    )
-    rev_btn.click(
-        fn=submit_review,
-        inputs=[rev_stars, rev_comment, rev_name],
-        outputs=[rev_status, rev_list]
-    )
+    start_btn.click(fn=start_app, outputs=[welcome_panel, main_panel, welcome_audio, rev_list])
+    voice_send.click(fn=process_voice, inputs=audio_input, outputs=[user_said, reply_box, history_box, audio_output, open_box])
+    text_send.click(fn=process_text, inputs=text_input, outputs=[reply_box, history_box, audio_output, open_box])
+    text_input.submit(fn=process_text, inputs=text_input, outputs=[reply_box, history_box, audio_output, open_box])
+    clear_btn.click(fn=clear_chat, outputs=[user_said, reply_box, history_box, audio_output, open_box])
+    rev_btn.click(fn=submit_review, inputs=[rev_stars, rev_comment, rev_name], outputs=[rev_status, rev_list])
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
