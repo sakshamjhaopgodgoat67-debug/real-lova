@@ -42,6 +42,32 @@ COMMANDS = {
     "lova": "https://lova-gtf7.onrender.com",
 }
 
+# Logo (SVG - matches Lova AI style)
+LOGO_SVG = """
+<svg width="120" height="120" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#38bdf8"/>
+      <stop offset="100%" style="stop-color:#818cf8"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="8" y="8" width="104" height="104" rx="28" fill="#0b1220" stroke="url(#g)" stroke-width="3"/>
+  <text x="28" y="78" font-family="Arial, sans-serif" font-size="56" font-weight="700" fill="url(#g)" filter="url(#glow)">L</text>
+  <g fill="#38bdf8">
+    <rect x="62" y="52" width="4" height="16" rx="2"/>
+    <rect x="70" y="46" width="4" height="28" rx="2"/>
+    <rect x="78" y="50" width="4" height="20" rx="2"/>
+    <rect x="86" y="44" width="4" height="32" rx="2"/>
+    <rect x="94" y="54" width="4" height="12" rx="2"/>
+  </g>
+  <circle cx="92" cy="36" r="3" fill="#7dd3fc"/>
+</svg>
+"""
+
 def load_reviews():
     try:
         if os.path.exists(REVIEWS_FILE):
@@ -74,18 +100,17 @@ def submit_review(stars, comment, name):
 def format_reviews():
     reviews = load_reviews()
     if not reviews:
-        return "<span style='color:#888'>No reviews yet. Be the first to rate Lova.</span>"
+        return "<span style='color:#88a'>No reviews yet. Be the first to rate Lova.</span>"
     html = ""
     for r in reviews[:12]:
         stars = "★" * r["stars"] + "☆" * (5 - r["stars"])
         html += f"""
-        <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);
-        border-radius:14px;padding:14px 16px;margin-bottom:10px;">
-            <div style="color:#ffd35a;font-size:1.05rem;">{stars}</div>
-            <div style="color:#fff;margin-top:6px;">{r['comment']}</div>
-            <div style="color:#777;font-size:0.8rem;margin-top:6px;">{r['name']} · {r['time']}</div>
-        </div>
-        """
+        <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);
+        border-radius:14px;padding:14px;margin-bottom:10px;">
+          <div style="color:#ffd35a;">{stars}</div>
+          <div style="color:#e8eef8;margin-top:6px;">{r['comment']}</div>
+          <div style="color:#7a8aa0;font-size:0.8rem;margin-top:6px;">{r['name']} · {r['time']}</div>
+        </div>"""
     return html
 
 def find_open_command(text):
@@ -93,8 +118,7 @@ def find_open_command(text):
         return None, None
     t = text.lower().strip()
     for name, url in COMMANDS.items():
-        for p in [f"open {name}", f"open the {name}", f"{name} kholo", f"kholo {name}",
-                  f"launch {name}", f"start {name}"]:
+        for p in [f"open {name}", f"open the {name}", f"{name} kholo", f"kholo {name}", f"launch {name}"]:
             if p in t:
                 return name, url
     return None, None
@@ -138,14 +162,11 @@ def is_mostly_hindi(text):
 
 def format_history():
     if not chat_history:
-        return "No messages yet. Try saying **open Grok** or record your voice."
-    out = ""
-    for m in chat_history[-12:]:
-        if m["role"] == "user":
-            out += f"**You:** {m['content']}\n\n"
-        else:
-            out += f"**Lova:** {m['content']}\n\n"
-    return out
+        return "No messages yet. Try **open Grok** or record your voice."
+    return "\n\n".join([
+        f"**You:** {m['content']}" if m["role"] == "user" else f"**Lova:** {m['content']}"
+        for m in chat_history[-12:]
+    ])
 
 def ask_llm(user_text):
     global chat_history
@@ -158,14 +179,14 @@ def ask_llm(user_text):
     if name and url:
         reply = f"Opening {name.capitalize()} for you."
         chat_history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
-        html = f'<script>window.open("{url}", "_blank");</script><p style="color:#7dd3fc">Opening <a href="{url}" target="_blank" style="color:#38bdf8">{name}</a>...</p>'
+        html = f'<script>window.open("{url}","_blank");</script><p style="color:#7dd3fc">Opening <a href="{url}" target="_blank" style="color:#38bdf8">{name}</a>...</p>'
         return reply, format_history(), html
 
     keys = ["who","what","when","where","stock","price","news","weather","current","latest","today","kya","kaun","kab","kahan"]
     extra = search_web(user_text) if any(k in user_text.lower() for k in keys) else ""
     messages = [{
         "role": "system",
-        "content": "You are Lova, a stylish helpful AI created by Saksham Jha. Reply in the user's language. Keep replies short and natural."
+        "content": "You are Lova, a helpful AI created by Saksham Jha. Reply in the user's language. Keep replies short."
     }] + chat_history[-6:] + [{
         "role": "user",
         "content": f"User: {user_text}\n\nInfo:\n{extra}\n\nAnswer:" if extra else user_text
@@ -209,99 +230,66 @@ def clear_chat():
     chat_history = []
     return "", "", "Chat cleared.", None, ""
 
-# ========== STYLISH CSS ==========
 css = """
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
-
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap');
 .gradio-container {
-    max-width: 100% !important;
-    min-height: 100vh !important;
-    padding: 0 !important;
-    background:
-        radial-gradient(1200px 600px at 10% -10%, rgba(56,189,248,0.18), transparent 50%),
-        radial-gradient(900px 500px at 100% 0%, rgba(167,139,250,0.15), transparent 45%),
-        linear-gradient(180deg, #070b14 0%, #0b1220 100%) !important;
-    font-family: 'Space Grotesk', system-ui, sans-serif !important;
-    color: #e8eef8 !important;
+  max-width: 100% !important; min-height: 100vh !important; padding: 0 !important;
+  background:
+    radial-gradient(1000px 500px at 15% -10%, rgba(56,189,248,0.2), transparent 50%),
+    radial-gradient(800px 400px at 100% 0%, rgba(129,140,248,0.16), transparent 45%),
+    #070b14 !important;
+  font-family: 'Space Grotesk', system-ui, sans-serif !important; color: #e8eef8 !important;
 }
 footer {display:none !important;}
-
-.main-wrap {padding: 28px 20px 40px; max-width: 1100px; margin: 0 auto;}
-
-.glass {
-    background: rgba(255,255,255,0.04) !important;
-    border: 1px solid rgba(255,255,255,0.08) !important;
-    border-radius: 20px !important;
-    backdrop-filter: blur(12px);
-    box-shadow: 0 10px 40px rgba(0,0,0,0.35);
-}
-
-button.primary, .start-btn button {
-    background: linear-gradient(135deg, #38bdf8, #818cf8) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 14px !important;
-    font-weight: 600 !important;
-    box-shadow: 0 8px 24px rgba(56,189,248,0.25) !important;
+.main-wrap {padding: 24px 16px 40px; max-width: 1100px; margin: 0 auto;}
+button.primary {
+  background: linear-gradient(135deg,#38bdf8,#818cf8) !important; color:#fff !important;
+  border:none !important; border-radius:14px !important; font-weight:600 !important;
 }
 """
 
 with gr.Blocks(title="Lova AI", css=css, theme=gr.themes.Base()) as demo:
 
-    # WELCOME
+    # WELCOME + LOGO
     with gr.Column(visible=True, elem_classes=["main-wrap"]) as welcome_panel:
-        gr.HTML("""
-        <div style="min-height:75vh;display:flex;align-items:center;justify-content:center;">
-          <div style="width:min(440px,92vw);text-align:center;padding:40px 28px;
+        gr.HTML(f"""
+        <div style="min-height:72vh;display:flex;align-items:center;justify-content:center;">
+          <div style="width:min(420px,94vw);text-align:center;padding:36px 24px;
             background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);
-            border-radius:28px;box-shadow:0 20px 60px rgba(0,0,0,0.45);
-            backdrop-filter:blur(16px);">
-            <div style="width:92px;height:92px;margin:0 auto 18px;border-radius:28px;
-              background:linear-gradient(135deg,#38bdf8,#a78bfa);display:flex;align-items:center;
-              justify-content:center;font-size:48px;box-shadow:0 12px 40px rgba(56,189,248,0.35);
-              animation:floaty 3s ease-in-out infinite;">✨</div>
-            <h1 style="margin:0;font-size:2.6rem;letter-spacing:4px;
+            border-radius:28px;box-shadow:0 20px 60px rgba(0,0,0,0.4);">
+            <div style="margin-bottom:12px;">{LOGO_SVG}</div>
+            <h1 style="margin:8px 0 0;font-size:2.5rem;letter-spacing:6px;
               background:linear-gradient(90deg,#fff,#93c5fd);-webkit-background-clip:text;
               -webkit-text-fill-color:transparent;">LOVA</h1>
-            <p style="color:#9fb0c7;margin:10px 0 6px;font-size:1.05rem;">Smart Voice AI Assistant</p>
-            <p style="color:#6b7c93;margin:0 0 22px;font-size:0.92rem;">Created by Saksham Jha</p>
-            <p style="color:#8494aa;font-size:0.9rem;line-height:1.55;margin:0 0 8px;">
-              Tap start to meet Lova. She’ll greet you and show how to use voice, chat, and commands.
+            <p style="color:#9fb0c7;margin:10px 0 4px;">Smart Voice AI Assistant</p>
+            <p style="color:#6b7c93;margin:0 0 18px;font-size:0.9rem;">Created by Saksham Jha</p>
+            <p style="color:#8494aa;font-size:0.9rem;line-height:1.5;">
+              Tap start. Lova will greet you and explain how to use voice, chat, and commands.
             </p>
           </div>
         </div>
-        <style>
-        @keyframes floaty {0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
-        </style>
         """)
-        with gr.Row(elem_classes=["start-btn"]):
-            start_btn = gr.Button("Start Lova →", variant="primary", size="lg")
+        start_btn = gr.Button("Start Lova →", variant="primary", size="lg")
 
     welcome_audio = gr.Audio(visible=False, autoplay=True)
 
-    # MAIN APP
+    # MAIN
     with gr.Column(visible=False, elem_classes=["main-wrap"]) as main_panel:
-        gr.HTML("""
-        <div style="display:flex;align-items:center;justify-content:space-between;
-          margin-bottom:18px;padding:16px 18px;border-radius:18px;
-          background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);">
-          <div style="display:flex;align-items:center;gap:12px;">
-            <div style="width:42px;height:42px;border-radius:14px;
-              background:linear-gradient(135deg,#38bdf8,#a78bfa);display:flex;
-              align-items:center;justify-content:center;">✨</div>
-            <div>
-              <div style="font-weight:700;font-size:1.25rem;letter-spacing:2px;">LOVA</div>
-              <div style="color:#7f8ea3;font-size:0.8rem;">Voice · Chat · Commands</div>
-            </div>
+        gr.HTML(f"""
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px;padding:14px 16px;
+          border-radius:18px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);">
+          <div style="width:48px;height:48px;overflow:hidden;">{LOGO_SVG.replace('width="120" height="120"', 'width="48" height="48"')}</div>
+          <div>
+            <div style="font-weight:700;letter-spacing:3px;font-size:1.2rem;">LOVA</div>
+            <div style="color:#7f8ea3;font-size:0.8rem;">Voice · Chat · Commands · by Saksham Jha</div>
           </div>
-          <div style="color:#6b7c93;font-size:0.8rem;">by Saksham Jha</div>
         </div>
         """)
 
         with gr.Row():
             with gr.Column(scale=5):
                 with gr.Tab("🎤 Voice"):
-                    gr.Markdown("Record your voice, then press **Send**")
+                    gr.Markdown("Record → then press **Send**")
                     audio_input = gr.Audio(sources=["microphone"], type="numpy", label="Microphone", format="wav")
                     user_said = gr.Textbox(label="You said", interactive=False)
                     voice_send = gr.Button("Send", variant="primary")
@@ -309,17 +297,17 @@ with gr.Blocks(title="Lova AI", css=css, theme=gr.themes.Base()) as demo:
                     text_input = gr.Textbox(label="Message or command", placeholder="Try: open Grok", lines=3)
                     text_send = gr.Button("Send", variant="primary")
                 with gr.Tab("⭐ Reviews"):
-                    gr.Markdown("Rate Lova and leave a compliment or suggestion")
+                    gr.Markdown("Rate Lova and leave a suggestion")
                     with gr.Row():
                         rev_name = gr.Textbox(label="Name", placeholder="Optional")
                         rev_stars = gr.Radio(["1","2","3","4","5"], label="Stars", value="5")
-                    rev_comment = gr.Textbox(label="Your review", lines=3, placeholder="What should improve?")
+                    rev_comment = gr.Textbox(label="Review", lines=3)
                     rev_btn = gr.Button("Submit review", variant="primary")
                     rev_status = gr.Markdown()
                     rev_list = gr.HTML(format_reviews())
 
             with gr.Column(scale=5):
-                history_box = gr.Markdown("Conversation will appear here.")
+                history_box = gr.Markdown("Conversation appears here.")
                 reply_box = gr.Textbox(label="Lova's reply", lines=4)
                 audio_output = gr.Audio(label="Lova's voice", autoplay=True)
                 open_box = gr.HTML()
