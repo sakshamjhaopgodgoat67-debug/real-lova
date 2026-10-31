@@ -177,9 +177,6 @@ def format_history(name):
 
 def ask_lova(text, voice_choice):
     name = user_profile.get("name")
-    if not name:
-        return "Please enter your name tag first.", "Not logged in.", None, ""
-
     text = (text or "").strip()
     if not text:
         return "Please type or speak something.", format_history(name), None, ""
