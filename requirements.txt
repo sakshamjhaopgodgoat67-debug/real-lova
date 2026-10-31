@@ -1,8 +1,6 @@
 gradio
 groq
 duckduckgo-search
+edge-tts
 numpy
 scipy
-edge-tts
-matplotlib
-yfinance
