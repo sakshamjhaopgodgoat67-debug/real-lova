@@ -1,24 +1,26 @@
 import gradio as gr
 import os
-import json
-import io
 import re
 import tempfile
 import asyncio
-from datetime import datetime
 from urllib.parse import quote
 
 import numpy as np
 import scipy.io.wavfile as wav
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    HAS_MPL = True
+except Exception:
+    HAS_MPL = False
+    plt = None
 
 from groq import Groq
 from duckduckgo_search import DDGS
 import edge_tts
 
-# Optional stock data
 try:
     import yfinance as yf
     HAS_YF = True
@@ -32,7 +34,6 @@ VERSION = "1.2.1"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
-OWNER_SECRET_NAME = "saksham"  # used only for owner-protection logic (not shown)
 chat_history = []
 user_profile = {"name": None, "voice": "female"}
 
@@ -68,7 +69,9 @@ def search_web(query: str) -> str:
             results = list(ddgs.text(query, max_results=4))
         if not results:
             return "No information found."
-        return "\n\n".join([f"{i}. {r.get('title','')}\n{r.get('body','')}" for i, r in enumerate(results, 1)])
+        return "\n\n".join(
+            [f"{i}. {r.get('title', '')}\n{r.get('body', '')}" for i, r in enumerate(results, 1)]
+        )
     except Exception as e:
         return f"Search error: {e}"
 
@@ -114,15 +117,15 @@ async def speak(text: str, voice_choice: str = "female"):
 
 
 def make_stock_graph(symbol: str):
-    """Returns image path or None"""
     symbol = (symbol or "").upper().strip()
     if not symbol:
         return None, "Please provide a symbol like AAPL, TSLA, RELIANCE.NS, USDINR=X"
     if not HAS_YF:
-        return None, "Stock graph package not available on server."
+        return None, "Stock package not available."
+    if not HAS_MPL:
+        return None, "Graph package not available."
 
     try:
-        # Forex often ends with =X
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="1mo", interval="1d")
         if df is None or df.empty:
@@ -139,6 +142,7 @@ def make_stock_graph(symbol: str):
         for spine in ax.spines.values():
             spine.set_color("#333333")
         ax.grid(True, alpha=0.2, color="#666666")
+
         path = tempfile.mktemp(suffix=".png")
         fig.tight_layout()
         fig.savefig(path, facecolor=fig.get_facecolor())
@@ -151,7 +155,6 @@ def make_stock_graph(symbol: str):
 def generate_image(prompt: str):
     if not prompt or not prompt.strip():
         return None, "Please describe the image."
-    # Free image endpoint (internet required)
     url = f"https://image.pollinations.ai/prompt/{quote(prompt.strip())}?width=768&height=768&nologo=true"
     return url, "Image generated."
 
@@ -177,14 +180,12 @@ def ask_lova(user_text: str, voice_choice: str):
 
     text = str(user_text).strip()
 
-    # Owner personal info protection
     if protect_owner_questions(text):
         reply = "You are not allowed to ask about my owner's personal name tag or private personal information."
         chat_history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
         audio = asyncio.run(speak(reply, voice_choice))
         return reply, format_history(), audio, None
 
-    # Graph command: "graph AAPL" / "chart USDINR=X"
     g = re.search(r"\b(?:graph|chart)\s+([A-Za-z0-9\.\=\-\^]+)", text, re.I)
     if g:
         img, msg = make_stock_graph(g.group(1))
@@ -193,7 +194,6 @@ def ask_lova(user_text: str, voice_choice: str):
         audio = asyncio.run(speak(reply, voice_choice))
         return reply, format_history(), audio, img
 
-    # Image command: "generate image of ..." / "draw ..."
     im = re.search(r"\b(?:generate image of|draw|create image of)\s+(.+)$", text, re.I)
     if im:
         url, msg = generate_image(im.group(1))
@@ -202,7 +202,6 @@ def ask_lova(user_text: str, voice_choice: str):
         audio = asyncio.run(speak("Your image is ready.", voice_choice))
         return reply, format_history(), audio, url
 
-    # Search when needed
     keys = ["who", "what", "when", "where", "price", "stock", "forex", "news", "today", "current", "kya", "kaun", "kab"]
     extra = search_web(text) if any(k in text.lower() for k in keys) else ""
 
@@ -286,6 +285,18 @@ def loro_locked():
     return f"🔒 Loro is locked.\nIt will open in Update 2.1.1.\nCurrent update is {VERSION}."
 
 
+def graph_only(symbol, voice):
+    img, msg = make_stock_graph(symbol)
+    audio = asyncio.run(speak(msg, voice or "female"))
+    return msg, img, audio
+
+
+def image_only(prompt, voice):
+    url, msg = generate_image(prompt)
+    audio = asyncio.run(speak("Image generated.", voice or "female"))
+    return msg, url, audio
+
+
 # ======================
 # PREMIUM UI
 # ======================
@@ -305,7 +316,6 @@ css = """
 }
 footer {display:none !important;}
 .wrap {max-width: 1100px; margin: 0 auto; padding: 22px 16px 40px;}
-.gold { color: #d4af37 !important; }
 button.primary {
   background: linear-gradient(135deg, #d4af37, #f0d789) !important;
   color: #111 !important; border: none !important; border-radius: 12px !important;
@@ -316,7 +326,7 @@ button.primary {
 with gr.Blocks(title=f"Lova AI v{VERSION}", css=css, theme=gr.themes.Base()) as demo:
     voice_state = gr.State("female")
 
-    # -------- NAME TAG GATE --------
+    # NAME TAG GATE
     with gr.Column(visible=True, elem_classes=["wrap"]) as gate:
         gr.HTML(f"""
         <div style="min-height:70vh;display:flex;align-items:center;justify-content:center;">
@@ -338,7 +348,7 @@ with gr.Blocks(title=f"Lova AI v{VERSION}", css=css, theme=gr.themes.Base()) as 
         gate_btn = gr.Button("Enter Lova", variant="primary")
         gate_msg = gr.Markdown("")
 
-    # -------- MAIN APP --------
+    # MAIN APP
     with gr.Column(visible=False, elem_classes=["wrap"]) as main:
         gr.HTML(f"""
         <div style="display:flex;justify-content:space-between;align-items:center;
@@ -359,7 +369,11 @@ with gr.Blocks(title=f"Lova AI v{VERSION}", css=css, theme=gr.themes.Base()) as 
                     heard = gr.Textbox(label="You said", interactive=False)
                     v_send = gr.Button("Send", variant="primary")
                 with gr.Tab("💬 Chat"):
-                    text_in = gr.Textbox(label="Message", lines=3, placeholder="Ask anything useful... (graph AAPL / generate image of ...)")
+                    text_in = gr.Textbox(
+                        label="Message",
+                        lines=3,
+                        placeholder="Ask anything useful... (graph AAPL / generate image of ...)"
+                    )
                     t_send = gr.Button("Send", variant="primary")
                 with gr.Tab("📈 Market Graph"):
                     sym = gr.Textbox(label="Symbol", placeholder="AAPL, TSLA, RELIANCE.NS, USDINR=X")
@@ -376,12 +390,10 @@ with gr.Blocks(title=f"Lova AI v{VERSION}", css=css, theme=gr.themes.Base()) as 
                 media_out = gr.Image(label="Image / Graph")
                 clear = gr.Button("Clear chat")
 
-        # Loro locked teaser (bottom-left style area)
         with gr.Row():
             loro_btn = gr.Button("🔒 Loro (Locked)", scale=1)
             loro_msg = gr.Markdown(f"Current update: **{VERSION}** · Loro opens at **2.1.1**")
 
-    # Events
     gate_btn.click(
         fn=save_name,
         inputs=[name_in, voice_in],
@@ -392,17 +404,6 @@ with gr.Blocks(title=f"Lova AI v{VERSION}", css=css, theme=gr.themes.Base()) as 
     text_in.submit(fn=process_text, inputs=[text_in, voice_state], outputs=[reply, history, audio_out, media_out])
     v_send.click(fn=process_voice, inputs=[audio_in, voice_state], outputs=[heard, reply, history, audio_out, media_out])
     clear.click(fn=clear_chat, outputs=[reply, history, audio_out, media_out])
-
-    def graph_only(symbol, voice):
-        img, msg = make_stock_graph(symbol)
-        audio = asyncio.run(speak(msg, voice or "female"))
-        return msg, img, audio
-
-    def image_only(prompt, voice):
-        url, msg = generate_image(prompt)
-        audio = asyncio.run(speak("Image generated.", voice or "female"))
-        return msg, url, audio
-
     g_btn.click(fn=graph_only, inputs=[sym, voice_state], outputs=[reply, media_out, audio_out])
     i_btn.click(fn=image_only, inputs=[img_prompt, voice_state], outputs=[reply, media_out, audio_out])
     loro_btn.click(fn=loro_locked, outputs=loro_msg)
