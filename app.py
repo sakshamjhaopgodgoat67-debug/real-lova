@@ -1,137 +1,77 @@
 import gradio as gr
 import os
 import json
-import numpy as np
-import scipy.io.wavfile as wav
+import io
+import re
 import tempfile
 import asyncio
 from datetime import datetime
+from urllib.parse import quote
+
+import numpy as np
+import scipy.io.wavfile as wav
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from groq import Groq
 from duckduckgo_search import DDGS
 import edge_tts
 
+# Optional stock data
+try:
+    import yfinance as yf
+    HAS_YF = True
+except Exception:
+    HAS_YF = False
+
+# ======================
+# CONFIG
+# ======================
+VERSION = "1.2.1"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
+OWNER_SECRET_NAME = "saksham"  # used only for owner-protection logic (not shown)
 chat_history = []
-REVIEWS_FILE = "reviews.json"
+user_profile = {"name": None, "voice": "female"}
 
-WELCOME_TEXT = (
-    "Hello, I am Lova. Welcome to Lova, a smart voice AI assistant. "
-    "Here is how you can use me. "
-    "Go to the Voice tab, record your message, then press Send. "
-    "Or type in the Text tab. "
-    "You can say things like open Grok, or open YouTube. "
-    "You can also leave a review with stars and suggestions. Enjoy!"
-)
-
-COMMANDS = {
-    "grok": "https://grok.com",
-    "youtube": "https://www.youtube.com",
-    "google": "https://www.google.com",
-    "instagram": "https://www.instagram.com",
-    "chatgpt": "https://chatgpt.com",
-    "whatsapp": "https://web.whatsapp.com",
-    "facebook": "https://www.facebook.com",
-    "twitter": "https://twitter.com",
-    "x": "https://x.com",
-    "github": "https://github.com",
-    "gmail": "https://mail.google.com",
-    "maps": "https://maps.google.com",
-    "wikipedia": "https://wikipedia.org",
-    "lova": "https://lova-gtf7.onrender.com",
+VOICES = {
+    "female": "en-US-AriaNeural",
+    "male": "en-US-GuyNeural",
+    "female_hindi": "hi-IN-SwaraNeural",
+    "male_hindi": "hi-IN-MadhurNeural",
 }
 
-# Logo (SVG - matches Lova AI style)
-LOGO_SVG = """
-<svg width="120" height="120" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#38bdf8"/>
-      <stop offset="100%" style="stop-color:#818cf8"/>
-    </linearGradient>
-    <filter id="glow">
-      <feGaussianBlur stdDeviation="2" result="b"/>
-      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-  </defs>
-  <rect x="8" y="8" width="104" height="104" rx="28" fill="#0b1220" stroke="url(#g)" stroke-width="3"/>
-  <text x="28" y="78" font-family="Arial, sans-serif" font-size="56" font-weight="700" fill="url(#g)" filter="url(#glow)">L</text>
-  <g fill="#38bdf8">
-    <rect x="62" y="52" width="4" height="16" rx="2"/>
-    <rect x="70" y="46" width="4" height="28" rx="2"/>
-    <rect x="78" y="50" width="4" height="20" rx="2"/>
-    <rect x="86" y="44" width="4" height="32" rx="2"/>
-    <rect x="94" y="54" width="4" height="12" rx="2"/>
-  </g>
-  <circle cx="92" cy="36" r="3" fill="#7dd3fc"/>
-</svg>
-"""
+# ======================
+# HELPERS
+# ======================
 
-def load_reviews():
-    try:
-        if os.path.exists(REVIEWS_FILE):
-            with open(REVIEWS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
+def is_hindi(text: str) -> bool:
+    return sum(1 for c in text if "\u0900" <= c <= "\u097F") >= 3
 
-def save_reviews(reviews):
-    try:
-        with open(REVIEWS_FILE, "w", encoding="utf-8") as f:
-            json.dump(reviews, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
 
-def submit_review(stars, comment, name):
-    if not stars:
-        return "Please select stars from 1 to 5.", format_reviews()
-    reviews = load_reviews()
-    reviews.insert(0, {
-        "stars": int(stars),
-        "comment": (comment or "").strip() or "No comment",
-        "name": (name or "").strip() or "Anonymous",
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    })
-    save_reviews(reviews[:50])
-    return "✅ Thank you for your review!", format_reviews()
+def protect_owner_questions(text: str) -> bool:
+    t = (text or "").lower()
+    triggers = [
+        "owner name", "your owner", "who is your owner", "creator name",
+        "saksham", "real name of owner", "where does your owner live",
+        "owner address", "owner phone", "owner school", "personal information of owner",
+        "owner's personal", "tell me about your owner personally"
+    ]
+    return any(x in t for x in triggers)
 
-def format_reviews():
-    reviews = load_reviews()
-    if not reviews:
-        return "<span style='color:#88a'>No reviews yet. Be the first to rate Lova.</span>"
-    html = ""
-    for r in reviews[:12]:
-        stars = "★" * r["stars"] + "☆" * (5 - r["stars"])
-        html += f"""
-        <div style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);
-        border-radius:14px;padding:14px;margin-bottom:10px;">
-          <div style="color:#ffd35a;">{stars}</div>
-          <div style="color:#e8eef8;margin-top:6px;">{r['comment']}</div>
-          <div style="color:#7a8aa0;font-size:0.8rem;margin-top:6px;">{r['name']} · {r['time']}</div>
-        </div>"""
-    return html
 
-def find_open_command(text):
-    if not text:
-        return None, None
-    t = text.lower().strip()
-    for name, url in COMMANDS.items():
-        for p in [f"open {name}", f"open the {name}", f"{name} kholo", f"kholo {name}", f"launch {name}"]:
-            if p in t:
-                return name, url
-    return None, None
-
-def search_web(query):
+def search_web(query: str) -> str:
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
+            results = list(ddgs.text(query, max_results=4))
         if not results:
             return "No information found."
-        return "\n\n".join([f"{i}. {r['title']}\n{r['body']}" for i, r in enumerate(results, 1)])
+        return "\n\n".join([f"{i}. {r.get('title','')}\n{r.get('body','')}" for i, r in enumerate(results, 1)])
     except Exception as e:
-        return f"Search error: {str(e)}"
+        return f"Search error: {e}"
+
 
 def transcribe_audio(audio):
     if audio is None:
@@ -149,176 +89,323 @@ def transcribe_audio(audio):
             path = f.name
         with open(path, "rb") as file:
             tr = client.audio.transcriptions.create(
-                file=(path, file.read()), model="whisper-large-v3", language=None
+                file=(path, file.read()),
+                model="whisper-large-v3",
+                language=None,
             )
         os.unlink(path)
-        return tr.text.strip()
+        return (tr.text or "").strip()
     except Exception as e:
-        return f"Transcription error: {str(e)}"
+        return f"Transcription error: {e}"
 
-def is_mostly_hindi(text):
-    hindi = set("अआइईउऊऋएऐओऔकखगघचछजझटठडढणतथदधनपफबभमयरलवशषसह")
-    return sum(1 for c in text if c in hindi) >= 3
 
-def format_history():
-    if not chat_history:
-        return "No messages yet. Try **open Grok** or record your voice."
-    return "\n\n".join([
-        f"**You:** {m['content']}" if m["role"] == "user" else f"**Lova:** {m['content']}"
-        for m in chat_history[-12:]
-    ])
-
-def ask_llm(user_text):
-    global chat_history
-    if not user_text or not user_text.strip():
-        return "Please say or type something.", format_history(), None
-    if user_text.startswith("Transcription error"):
-        return user_text, format_history(), None
-
-    name, url = find_open_command(user_text)
-    if name and url:
-        reply = f"Opening {name.capitalize()} for you."
-        chat_history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
-        html = f'<script>window.open("{url}","_blank");</script><p style="color:#7dd3fc">Opening <a href="{url}" target="_blank" style="color:#38bdf8">{name}</a>...</p>'
-        return reply, format_history(), html
-
-    keys = ["who","what","when","where","stock","price","news","weather","current","latest","today","kya","kaun","kab","kahan"]
-    extra = search_web(user_text) if any(k in user_text.lower() for k in keys) else ""
-    messages = [{
-        "role": "system",
-        "content": "You are Lova, a helpful AI created by Saksham Jha. Reply in the user's language. Keep replies short."
-    }] + chat_history[-6:] + [{
-        "role": "user",
-        "content": f"User: {user_text}\n\nInfo:\n{extra}\n\nAnswer:" if extra else user_text
-    }]
+async def speak(text: str, voice_choice: str = "female"):
     try:
-        r = client.chat.completions.create(messages=messages, model="openai/gpt-oss-20b")
-        reply = r.choices[0].message.content.strip()
-    except Exception as e:
-        reply = f"Sorry, error: {str(e)}"
-    chat_history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply}]
-    return reply, format_history(), None
-
-async def tts(text, voice=None):
-    try:
-        if voice is None:
-            voice = "hi-IN-SwaraNeural" if is_mostly_hindi(text) else "en-US-AriaNeural"
-        c = edge_tts.Communicate(text, voice=voice)
+        if is_hindi(text):
+            voice = VOICES["female_hindi"] if voice_choice == "female" else VOICES["male_hindi"]
+        else:
+            voice = VOICES["female"] if voice_choice == "female" else VOICES["male"]
+        communicate = edge_tts.Communicate(text, voice=voice)
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-            await c.save(f.name)
+            await communicate.save(f.name)
             return f.name
     except Exception:
         return None
 
-def start_app():
-    audio = asyncio.run(tts(WELCOME_TEXT, voice="en-US-AriaNeural"))
-    return gr.update(visible=False), gr.update(visible=True), audio, format_reviews()
 
-def process_voice(audio):
-    user_text = transcribe_audio(audio)
-    if not user_text:
-        return "", "I couldn't hear you.", format_history(), None, ""
-    reply, hist, html = ask_llm(user_text)
-    return user_text, reply, hist, asyncio.run(tts(reply)), html or ""
+def make_stock_graph(symbol: str):
+    """Returns image path or None"""
+    symbol = (symbol or "").upper().strip()
+    if not symbol:
+        return None, "Please provide a symbol like AAPL, TSLA, RELIANCE.NS, USDINR=X"
+    if not HAS_YF:
+        return None, "Stock graph package not available on server."
 
-def process_text(user_text):
-    reply, hist, html = ask_llm(user_text)
-    return reply, hist, asyncio.run(tts(reply)), html or ""
+    try:
+        # Forex often ends with =X
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="1mo", interval="1d")
+        if df is None or df.empty:
+            return None, f"No data found for {symbol}."
+
+        fig, ax = plt.subplots(figsize=(9, 4.5), dpi=120)
+        ax.plot(df.index, df["Close"], color="#d4af37", linewidth=2)
+        ax.set_title(f"{symbol} — Last 1 Month", color="white", fontsize=14)
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Close Price")
+        ax.set_facecolor("#0f0f12")
+        fig.patch.set_facecolor("#0b0b0e")
+        ax.tick_params(colors="#cccccc")
+        for spine in ax.spines.values():
+            spine.set_color("#333333")
+        ax.grid(True, alpha=0.2, color="#666666")
+        path = tempfile.mktemp(suffix=".png")
+        fig.tight_layout()
+        fig.savefig(path, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        return path, f"Graph ready for {symbol}."
+    except Exception as e:
+        return None, f"Graph error: {e}"
+
+
+def generate_image(prompt: str):
+    if not prompt or not prompt.strip():
+        return None, "Please describe the image."
+    # Free image endpoint (internet required)
+    url = f"https://image.pollinations.ai/prompt/{quote(prompt.strip())}?width=768&height=768&nologo=true"
+    return url, "Image generated."
+
+
+def format_history():
+    if not chat_history:
+        return "No messages yet."
+    lines = []
+    for m in chat_history[-16:]:
+        who = "You" if m["role"] == "user" else "Lova"
+        lines.append(f"**{who}:** {m['content']}")
+    return "\n\n".join(lines)
+
+
+def ask_lova(user_text: str, voice_choice: str):
+    global chat_history
+
+    if not user_profile.get("name"):
+        return "Please enter your name tag first.", format_history(), None, None
+
+    if not user_text or not str(user_text).strip():
+        return "Please say or type something.", format_history(), None, None
+
+    text = str(user_text).strip()
+
+    # Owner personal info protection
+    if protect_owner_questions(text):
+        reply = "You are not allowed to ask about my owner's personal name tag or private personal information."
+        chat_history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+        audio = asyncio.run(speak(reply, voice_choice))
+        return reply, format_history(), audio, None
+
+    # Graph command: "graph AAPL" / "chart USDINR=X"
+    g = re.search(r"\b(?:graph|chart)\s+([A-Za-z0-9\.\=\-\^]+)", text, re.I)
+    if g:
+        img, msg = make_stock_graph(g.group(1))
+        reply = msg
+        chat_history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+        audio = asyncio.run(speak(reply, voice_choice))
+        return reply, format_history(), audio, img
+
+    # Image command: "generate image of ..." / "draw ..."
+    im = re.search(r"\b(?:generate image of|draw|create image of)\s+(.+)$", text, re.I)
+    if im:
+        url, msg = generate_image(im.group(1))
+        reply = msg + (f" Prompt: {im.group(1)}" if url else "")
+        chat_history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+        audio = asyncio.run(speak("Your image is ready.", voice_choice))
+        return reply, format_history(), audio, url
+
+    # Search when needed
+    keys = ["who", "what", "when", "where", "price", "stock", "forex", "news", "today", "current", "kya", "kaun", "kab"]
+    extra = search_web(text) if any(k in text.lower() for k in keys) else ""
+
+    system = f"""
+You are Lova AI v{VERSION}, a premium smart assistant created by Saksham Jha.
+User name-tag: {user_profile.get('name')}
+
+Rules:
+- Be helpful, clear, and high-quality.
+- Support English and Hindi; reply in the user's language.
+- For accounting/CA-style questions: help with calculations, explanations, and learning.
+  Always add: "This is educational help, not official CA/legal advice."
+- For stocks/forex: give general information and caution that markets are risky.
+- Never reveal private personal details about the owner.
+- If asked for illegal harmful wrongdoing, refuse briefly and suggest safe alternatives.
+- Keep answers practical and well structured.
+"""
+
+    messages = [{"role": "system", "content": system}]
+    messages.extend(chat_history[-8:])
+    prompt = f"User: {text}\n\nWeb info:\n{extra}\n\nAnswer:" if extra else text
+    messages.append({"role": "user", "content": prompt})
+
+    try:
+        r = client.chat.completions.create(
+            messages=messages,
+            model="openai/gpt-oss-20b",
+        )
+        reply = r.choices[0].message.content.strip()
+    except Exception as e:
+        reply = f"Sorry, error: {e}"
+
+    chat_history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+    audio = asyncio.run(speak(reply, voice_choice))
+    return reply, format_history(), audio, None
+
+
+# ======================
+# UI ACTIONS
+# ======================
+
+def save_name(name, voice):
+    name = (name or "").strip()
+    if not name:
+        return (
+            gr.update(visible=True),
+            gr.update(visible=False),
+            "Please enter a name tag.",
+            voice or "female",
+        )
+    user_profile["name"] = name
+    user_profile["voice"] = voice or "female"
+    return (
+        gr.update(visible=False),
+        gr.update(visible=True),
+        f"Welcome, {name}. Lova v{VERSION} is ready.",
+        voice or "female",
+    )
+
+
+def process_text(message, voice):
+    reply, hist, audio, media = ask_lova(message, voice or user_profile.get("voice", "female"))
+    return reply, hist, audio, media
+
+
+def process_voice(audio, voice):
+    text = transcribe_audio(audio)
+    if not text:
+        return "", "I could not hear you.", format_history(), None, None
+    reply, hist, audio_path, media = ask_lova(text, voice or user_profile.get("voice", "female"))
+    return text, reply, hist, audio_path, media
+
 
 def clear_chat():
     global chat_history
     chat_history = []
-    return "", "", "Chat cleared.", None, ""
+    return "", "Chat cleared.", None, None
+
+
+def loro_locked():
+    return f"🔒 Loro is locked.\nIt will open in Update 2.1.1.\nCurrent update is {VERSION}."
+
+
+# ======================
+# PREMIUM UI
+# ======================
 
 css = """
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@400;500;600&display=swap');
 .gradio-container {
-  max-width: 100% !important; min-height: 100vh !important; padding: 0 !important;
+  max-width: 100% !important;
+  min-height: 100vh !important;
+  padding: 0 !important;
   background:
-    radial-gradient(1000px 500px at 15% -10%, rgba(56,189,248,0.2), transparent 50%),
-    radial-gradient(800px 400px at 100% 0%, rgba(129,140,248,0.16), transparent 45%),
-    #070b14 !important;
-  font-family: 'Space Grotesk', system-ui, sans-serif !important; color: #e8eef8 !important;
+    radial-gradient(1000px 500px at 0% 0%, rgba(212,175,55,0.12), transparent 50%),
+    radial-gradient(900px 500px at 100% 0%, rgba(120,120,140,0.12), transparent 45%),
+    linear-gradient(180deg, #070709 0%, #101016 100%) !important;
+  font-family: Inter, system-ui, sans-serif !important;
+  color: #f3f3f3 !important;
 }
 footer {display:none !important;}
-.main-wrap {padding: 24px 16px 40px; max-width: 1100px; margin: 0 auto;}
+.wrap {max-width: 1100px; margin: 0 auto; padding: 22px 16px 40px;}
+.gold { color: #d4af37 !important; }
 button.primary {
-  background: linear-gradient(135deg,#38bdf8,#818cf8) !important; color:#fff !important;
-  border:none !important; border-radius:14px !important; font-weight:600 !important;
+  background: linear-gradient(135deg, #d4af37, #f0d789) !important;
+  color: #111 !important; border: none !important; border-radius: 12px !important;
+  font-weight: 700 !important;
 }
 """
 
-with gr.Blocks(title="Lova AI", css=css, theme=gr.themes.Base()) as demo:
+with gr.Blocks(title=f"Lova AI v{VERSION}", css=css, theme=gr.themes.Base()) as demo:
+    voice_state = gr.State("female")
 
-    # WELCOME + LOGO
-    with gr.Column(visible=True, elem_classes=["main-wrap"]) as welcome_panel:
+    # -------- NAME TAG GATE --------
+    with gr.Column(visible=True, elem_classes=["wrap"]) as gate:
         gr.HTML(f"""
-        <div style="min-height:72vh;display:flex;align-items:center;justify-content:center;">
-          <div style="width:min(420px,94vw);text-align:center;padding:36px 24px;
-            background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);
-            border-radius:28px;box-shadow:0 20px 60px rgba(0,0,0,0.4);">
-            <div style="margin-bottom:12px;">{LOGO_SVG}</div>
-            <h1 style="margin:8px 0 0;font-size:2.5rem;letter-spacing:6px;
-              background:linear-gradient(90deg,#fff,#93c5fd);-webkit-background-clip:text;
-              -webkit-text-fill-color:transparent;">LOVA</h1>
-            <p style="color:#9fb0c7;margin:10px 0 4px;">Smart Voice AI Assistant</p>
-            <p style="color:#6b7c93;margin:0 0 18px;font-size:0.9rem;">Created by Saksham Jha</p>
-            <p style="color:#8494aa;font-size:0.9rem;line-height:1.5;">
-              Tap start. Lova will greet you and explain how to use voice, chat, and commands.
-            </p>
+        <div style="min-height:70vh;display:flex;align-items:center;justify-content:center;">
+          <div style="width:min(460px,96vw);padding:34px 26px;border-radius:22px;
+            background:rgba(255,255,255,0.04);border:1px solid rgba(212,175,55,0.35);
+            box-shadow:0 20px 60px rgba(0,0,0,0.45);text-align:center;">
+            <div style="font-family:Playfair Display,serif;font-size:2.4rem;letter-spacing:4px;
+              color:#d4af37;margin-bottom:6px;">LOVA</div>
+            <div style="color:#aaa;margin-bottom:18px;">Premium Voice AI · Update {VERSION}</div>
+            <div style="color:#ccc;font-size:0.95rem;line-height:1.5;margin-bottom:8px;">
+              Enter your <b>Name Tag</b> to continue.<br>
+              Personal owner details stay protected.
+            </div>
           </div>
         </div>
         """)
-        start_btn = gr.Button("Start Lova →", variant="primary", size="lg")
+        name_in = gr.Textbox(label="Name Tag", placeholder="Enter your name")
+        voice_in = gr.Radio(["female", "male"], value="female", label="Voice")
+        gate_btn = gr.Button("Enter Lova", variant="primary")
+        gate_msg = gr.Markdown("")
 
-    welcome_audio = gr.Audio(visible=False, autoplay=True)
-
-    # MAIN
-    with gr.Column(visible=False, elem_classes=["main-wrap"]) as main_panel:
+    # -------- MAIN APP --------
+    with gr.Column(visible=False, elem_classes=["wrap"]) as main:
         gr.HTML(f"""
-        <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px;padding:14px 16px;
-          border-radius:18px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);">
-          <div style="width:48px;height:48px;overflow:hidden;">{LOGO_SVG.replace('width="120" height="120"', 'width="48" height="48"')}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;
+          padding:14px 16px;border-radius:16px;margin-bottom:14px;
+          background:rgba(255,255,255,0.03);border:1px solid rgba(212,175,55,0.25);">
           <div>
-            <div style="font-weight:700;letter-spacing:3px;font-size:1.2rem;">LOVA</div>
-            <div style="color:#7f8ea3;font-size:0.8rem;">Voice · Chat · Commands · by Saksham Jha</div>
+            <div style="font-family:Playfair Display,serif;font-size:1.6rem;color:#d4af37;letter-spacing:3px;">LOVA</div>
+            <div style="color:#888;font-size:0.85rem;">Update {VERSION} · Premium Assistant</div>
           </div>
+          <div style="color:#d4af37;font-weight:600;">v{VERSION}</div>
         </div>
         """)
 
         with gr.Row():
             with gr.Column(scale=5):
                 with gr.Tab("🎤 Voice"):
-                    gr.Markdown("Record → then press **Send**")
-                    audio_input = gr.Audio(sources=["microphone"], type="numpy", label="Microphone", format="wav")
-                    user_said = gr.Textbox(label="You said", interactive=False)
-                    voice_send = gr.Button("Send", variant="primary")
+                    audio_in = gr.Audio(sources=["microphone"], type="numpy", label="Record", format="wav")
+                    heard = gr.Textbox(label="You said", interactive=False)
+                    v_send = gr.Button("Send", variant="primary")
                 with gr.Tab("💬 Chat"):
-                    text_input = gr.Textbox(label="Message or command", placeholder="Try: open Grok", lines=3)
-                    text_send = gr.Button("Send", variant="primary")
-                with gr.Tab("⭐ Reviews"):
-                    gr.Markdown("Rate Lova and leave a suggestion")
-                    with gr.Row():
-                        rev_name = gr.Textbox(label="Name", placeholder="Optional")
-                        rev_stars = gr.Radio(["1","2","3","4","5"], label="Stars", value="5")
-                    rev_comment = gr.Textbox(label="Review", lines=3)
-                    rev_btn = gr.Button("Submit review", variant="primary")
-                    rev_status = gr.Markdown()
-                    rev_list = gr.HTML(format_reviews())
+                    text_in = gr.Textbox(label="Message", lines=3, placeholder="Ask anything useful... (graph AAPL / generate image of ...)")
+                    t_send = gr.Button("Send", variant="primary")
+                with gr.Tab("📈 Market Graph"):
+                    sym = gr.Textbox(label="Symbol", placeholder="AAPL, TSLA, RELIANCE.NS, USDINR=X")
+                    g_btn = gr.Button("Generate Graph", variant="primary")
+                with gr.Tab("🖼️ Image"):
+                    img_prompt = gr.Textbox(label="Image prompt", placeholder="A luxury robot in a gold room")
+                    i_btn = gr.Button("Generate Image", variant="primary")
 
             with gr.Column(scale=5):
-                history_box = gr.Markdown("Conversation appears here.")
-                reply_box = gr.Textbox(label="Lova's reply", lines=4)
-                audio_output = gr.Audio(label="Lova's voice", autoplay=True)
-                open_box = gr.HTML()
-                clear_btn = gr.Button("Clear chat")
+                status = gr.Markdown("Welcome.")
+                history = gr.Markdown("No messages yet.")
+                reply = gr.Textbox(label="Lova", lines=6)
+                audio_out = gr.Audio(label="Voice reply", autoplay=True)
+                media_out = gr.Image(label="Image / Graph")
+                clear = gr.Button("Clear chat")
 
-    start_btn.click(fn=start_app, outputs=[welcome_panel, main_panel, welcome_audio, rev_list])
-    voice_send.click(fn=process_voice, inputs=audio_input, outputs=[user_said, reply_box, history_box, audio_output, open_box])
-    text_send.click(fn=process_text, inputs=text_input, outputs=[reply_box, history_box, audio_output, open_box])
-    text_input.submit(fn=process_text, inputs=text_input, outputs=[reply_box, history_box, audio_output, open_box])
-    clear_btn.click(fn=clear_chat, outputs=[user_said, reply_box, history_box, audio_output, open_box])
-    rev_btn.click(fn=submit_review, inputs=[rev_stars, rev_comment, rev_name], outputs=[rev_status, rev_list])
+        # Loro locked teaser (bottom-left style area)
+        with gr.Row():
+            loro_btn = gr.Button("🔒 Loro (Locked)", scale=1)
+            loro_msg = gr.Markdown(f"Current update: **{VERSION}** · Loro opens at **2.1.1**")
+
+    # Events
+    gate_btn.click(
+        fn=save_name,
+        inputs=[name_in, voice_in],
+        outputs=[gate, main, status, voice_state],
+    )
+
+    t_send.click(fn=process_text, inputs=[text_in, voice_state], outputs=[reply, history, audio_out, media_out])
+    text_in.submit(fn=process_text, inputs=[text_in, voice_state], outputs=[reply, history, audio_out, media_out])
+    v_send.click(fn=process_voice, inputs=[audio_in, voice_state], outputs=[heard, reply, history, audio_out, media_out])
+    clear.click(fn=clear_chat, outputs=[reply, history, audio_out, media_out])
+
+    def graph_only(symbol, voice):
+        img, msg = make_stock_graph(symbol)
+        audio = asyncio.run(speak(msg, voice or "female"))
+        return msg, img, audio
+
+    def image_only(prompt, voice):
+        url, msg = generate_image(prompt)
+        audio = asyncio.run(speak("Image generated.", voice or "female"))
+        return msg, url, audio
+
+    g_btn.click(fn=graph_only, inputs=[sym, voice_state], outputs=[reply, media_out, audio_out])
+    i_btn.click(fn=image_only, inputs=[img_prompt, voice_state], outputs=[reply, media_out, audio_out])
+    loro_btn.click(fn=loro_locked, outputs=loro_msg)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
