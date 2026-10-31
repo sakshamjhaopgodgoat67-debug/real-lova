@@ -1,24 +1,22 @@
+import gradio as gr
 import os
 import re
-import json
 import tempfile
 import asyncio
-from typing import Optional
+import concurrent.futures
+from urllib.parse import quote
 
-from fastapi import FastAPI, Form
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+import numpy as np
+import scipy.io.wavfile as wav
 from groq import Groq
 from duckduckgo_search import DDGS
 import edge_tts
 
 VERSION = "1.2.1"
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-client = Groq(api_key=GROQ_API_KEY)
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-app = FastAPI(title=f"Lova AI v{VERSION}")
-
-# simple memory (resets when server restarts)
-SESSIONS = {}
+chat_history = []
+user_profile = {"name": None, "voice": "female"}
 
 VOICES = {
     "female": "en-US-AriaNeural",
@@ -26,6 +24,28 @@ VOICES = {
     "female_hindi": "hi-IN-SwaraNeural",
     "male_hindi": "hi-IN-MadhurNeural",
 }
+
+COMMANDS = {
+    "grok": "https://grok.com",
+    "youtube": "https://www.youtube.com",
+    "google": "https://www.google.com",
+    "instagram": "https://www.instagram.com",
+    "chatgpt": "https://chatgpt.com",
+    "github": "https://github.com",
+    "gmail": "https://mail.google.com",
+    "lova": "https://real-lova.onrender.com",
+}
+
+
+def run_async(coro):
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result(timeout=120)
+        return loop.run_until_complete(coro)
+    except RuntimeError:
+        return asyncio.run(coro)
 
 
 def is_hindi(text: str) -> bool:
@@ -36,9 +56,19 @@ def protect_owner(text: str) -> bool:
     t = (text or "").lower()
     keys = [
         "owner name", "your owner", "who is your owner", "creator name", "saksham",
-        "owner address", "owner phone", "owner school", "personal information of owner"
+        "owner address", "owner phone", "owner school", "personal information of owner",
+        "owner's personal"
     ]
     return any(k in t for k in keys)
+
+
+def find_open_command(text: str):
+    t = (text or "").lower()
+    for name, url in COMMANDS.items():
+        for p in [f"open {name}", f"{name} kholo", f"kholo {name}", f"launch {name}"]:
+            if p in t:
+                return name, url
+    return None, None
 
 
 def search_web(query: str) -> str:
@@ -52,240 +82,223 @@ def search_web(query: str) -> str:
         return ""
 
 
-async def tts(text: str, voice_choice: str = "female") -> Optional[str]:
+def transcribe(audio):
+    if audio is None:
+        return ""
+    try:
+        sr, data = audio
+        if len(data.shape) > 1:
+            data = data.mean(axis=1)
+        data = data.astype(np.float32)
+        m = np.max(np.abs(data))
+        if m > 0:
+            data = data / m
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav.write(f.name, sr, (data * 32767).astype(np.int16))
+            path = f.name
+        with open(path, "rb") as file:
+            tr = client.audio.transcriptions.create(
+                file=(path, file.read()),
+                model="whisper-large-v3",
+                language=None,
+            )
+        os.unlink(path)
+        return (tr.text or "").strip()
+    except Exception as e:
+        return f"Transcription error: {e}"
+
+
+async def speak(text, voice_choice="female"):
     try:
         if is_hindi(text):
-            voice = VOICES["female_hindi"] if voice_choice == "female" else VOICES["male_hindi"]
+            v = VOICES["female_hindi"] if voice_choice == "female" else VOICES["male_hindi"]
         else:
-            voice = VOICES["female"] if voice_choice == "female" else VOICES["male"]
+            v = VOICES["female"] if voice_choice == "female" else VOICES["male"]
         path = tempfile.mktemp(suffix=".mp3")
-        await edge_tts.Communicate(text, voice=voice).save(path)
+        await edge_tts.Communicate(text, voice=v).save(path)
         return path
     except Exception:
         return None
 
 
-def ask_llm(user_text: str, history: list, name: str) -> str:
-    if protect_owner(user_text):
-        return "You are not allowed to ask about my owner's personal name tag or private personal information."
+def format_history():
+    if not chat_history:
+        return "No messages yet. Use **Voice** or **Chat** mode."
+    return "\n\n".join([
+        ("**You:** " if m["role"] == "user" else "**Lova:** ") + m["content"]
+        for m in chat_history[-12:]
+    ])
 
-    keys = ["who", "what", "when", "where", "price", "stock", "news", "today", "current", "kya", "kaun"]
-    extra = search_web(user_text) if any(k in user_text.lower() for k in keys) else ""
 
-    system = f"""
-You are Lova AI v{VERSION}, premium assistant by Saksham Jha.
-User name-tag: {name}
-Reply in user's language (English/Hindi).
+def ask_lova(text, voice_choice):
+    global chat_history
+    text = (text or "").strip()
+    if not user_profile.get("name"):
+        return "Enter your name tag first.", format_history(), None, ""
+    if not text:
+        return "Please type or speak something.", format_history(), None, ""
+
+    if protect_owner(text):
+        reply = "You are not allowed to ask about my owner's personal name tag or private personal information."
+        chat_history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+        return reply, format_history(), run_async(speak(reply, voice_choice)), ""
+
+    name, url = find_open_command(text)
+    if name and url:
+        reply = f"Opening {name.capitalize()} for you."
+        chat_history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+        html = f'<script>window.open("{url}","_blank");</script><p>Opening <a href="{url}" target="_blank">{name}</a></p>'
+        return reply, format_history(), run_async(speak(reply, voice_choice)), html
+
+    # image command
+    im = re.search(r"\b(?:generate image of|draw|create image of)\s+(.+)$", text, re.I)
+    open_html = ""
+    image_url = None
+    if im:
+        prompt = im.group(1).strip()
+        image_url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?width=768&height=768&nologo=true"
+        reply = f"Image generated for: {prompt}"
+        chat_history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+        return reply, format_history(), run_async(speak("Your image is ready.", voice_choice)), open_html
+
+    keys = ["who", "what", "when", "where", "price", "stock", "news", "today", "current", "kya", "kaun", "kab"]
+    extra = search_web(text) if any(k in text.lower() for k in keys) else ""
+
+    system = f"""You are Lova AI v{VERSION}, premium assistant by Saksham Jha.
+User name-tag: {user_profile.get('name')}
+Reply in the user's language (English/Hindi).
 For accounting questions: educational help only, not official CA advice.
 Never reveal private owner personal details.
 Refuse illegal harmful requests briefly.
-Keep answers clear and useful.
-"""
-    messages = [{"role": "system", "content": system}] + history[-8:]
-    content = f"User: {user_text}\n\nInfo:\n{extra}\n\nAnswer:" if extra else user_text
-    messages.append({"role": "user", "content": content})
+Be clear and useful."""
+
+    messages = [{"role": "system", "content": system}] + chat_history[-8:]
+    messages.append({"role": "user", "content": f"User: {text}\n\nInfo:\n{extra}\n\nAnswer:" if extra else text})
 
     try:
         r = client.chat.completions.create(messages=messages, model="openai/gpt-oss-20b")
-        return r.choices[0].message.content.strip()
+        reply = r.choices[0].message.content.strip()
     except Exception as e:
-        return f"Sorry, error: {e}"
+        reply = f"Sorry, error: {e}"
+
+    chat_history += [{"role": "user", "content": text}, {"role": "assistant", "content": reply}]
+    audio = run_async(speak(reply, voice_choice))
+    return reply, format_history(), audio, open_html
 
 
-HTML_PAGE = f"""
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Lova AI v{VERSION}</title>
-  <style>
-    body {{
-      margin:0; font-family: Inter, system-ui, sans-serif;
-      background: radial-gradient(1000px 500px at 0% 0%, rgba(212,175,55,.12), transparent 50%),
-                  linear-gradient(180deg,#070709,#121218);
-      color:#f2f2f2; min-height:100vh;
-    }}
-    .wrap {{ max-width:900px; margin:0 auto; padding:24px 16px; }}
-    .card {{
-      background:rgba(255,255,255,.04); border:1px solid rgba(212,175,55,.35);
-      border-radius:18px; padding:20px; box-shadow:0 20px 50px rgba(0,0,0,.35);
-    }}
-    h1 {{ color:#d4af37; letter-spacing:3px; margin:0 0 6px; font-size:2rem; }}
-    .muted {{ color:#9a9a9a; margin-bottom:16px; }}
-    input, select, textarea, button {{
-      width:100%; box-sizing:border-box; margin:8px 0; padding:12px;
-      border-radius:10px; border:1px solid #333; background:#0f0f14; color:#fff;
-    }}
-    button {{
-      background:linear-gradient(135deg,#d4af37,#f0d789); color:#111;
-      border:none; font-weight:700; cursor:pointer;
-    }}
-    #chat {{
-      height:320px; overflow:auto; background:#0b0b10; border-radius:12px;
-      padding:12px; border:1px solid #222; margin:10px 0;
-      white-space:pre-wrap; line-height:1.45;
-    }}
-    .row {{ display:flex; gap:10px; }}
-    .row > * {{ flex:1; }}
-    .hidden {{ display:none; }}
-    .loro {{
-      margin-top:14px; padding:12px; border:1px dashed rgba(212,175,55,.5);
-      border-radius:12px; color:#d4af37;
-    }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div id="gate" class="card">
-      <h1>LOVA</h1>
-      <div class="muted">Premium Voice AI · Update {VERSION}</div>
-      <label>Name Tag</label>
-      <input id="name" placeholder="Enter your name tag"/>
-      <label>Voice</label>
-      <select id="voice">
-        <option value="female">Female</option>
-        <option value="male">Male</option>
-      </select>
-      <button onclick="enterApp()">Enter Lova</button>
-      <p id="gateMsg" class="muted"></p>
-    </div>
+def login(name, voice):
+    name = (name or "").strip()
+    if not name:
+        return gr.update(visible=True), gr.update(visible=False), "Please enter a name tag.", "female"
+    user_profile["name"] = name
+    user_profile["voice"] = voice or "female"
+    return gr.update(visible=False), gr.update(visible=True), f"Welcome, {name}. Lova v{VERSION} ready.", voice or "female"
 
-    <div id="main" class="card hidden">
-      <h1>LOVA <span style="font-size:0.9rem;color:#aaa">v{VERSION}</span></h1>
-      <div class="muted" id="welcome"></div>
-      <div id="chat">No messages yet.</div>
-      <textarea id="msg" rows="3" placeholder="Type your message..."></textarea>
-      <div class="row">
-        <button onclick="sendMsg()">Send</button>
-        <button onclick="clearChat()" style="background:#333;color:#fff">Clear</button>
-      </div>
-      <audio id="player" controls style="width:100%; margin-top:10px;"></audio>
-      <div class="loro" onclick="loro()">
-        🔒 Loro (Locked) — opens at Update 2.1.1 (current {VERSION})
-      </div>
-      <p id="loroMsg" class="muted"></p>
-    </div>
-  </div>
 
-<script>
-let sessionId = Math.random().toString(36).slice(2);
+def process_text(msg, voice):
+    try:
+        reply, hist, audio, html = ask_lova(msg, voice or "female")
+        return reply, hist, audio, html, None
+    except Exception as e:
+        return f"Error: {e}", format_history(), None, "", None
 
-function enterApp() {{
-  const name = document.getElementById('name').value.trim();
-  const voice = document.getElementById('voice').value;
-  if(!name) {{ document.getElementById('gateMsg').innerText = 'Please enter a name tag.'; return; }}
-  fetch('/api/login', {{
-    method:'POST',
-    headers:{{'Content-Type':'application/json'}},
-    body: JSON.stringify({{session_id: sessionId, name, voice}})
-  }}).then(r=>r.json()).then(d=>{{
-    document.getElementById('gate').classList.add('hidden');
-    document.getElementById('main').classList.remove('hidden');
-    document.getElementById('welcome').innerText = d.message;
-  }});
-}}
 
-function sendMsg() {{
-  const message = document.getElementById('msg').value.trim();
-  if(!message) return;
-  fetch('/api/chat', {{
-    method:'POST',
-    headers:{{'Content-Type':'application/json'}},
-    body: JSON.stringify({{session_id: sessionId, message}})
-  }}).then(r=>r.json()).then(d=>{{
-    document.getElementById('chat').innerText = d.history;
-    document.getElementById('msg').value = '';
-    if(d.audio_url) {{
-      const p = document.getElementById('player');
-      p.src = d.audio_url;
-      p.play();
-    }}
-  }});
-}}
+def process_voice(audio, voice):
+    try:
+        text = transcribe(audio)
+        if not text:
+            return "", "I could not hear you.", format_history(), None, "", None
+        reply, hist, audio_path, html = ask_lova(text, voice or "female")
+        # if image command happened, recover url from reply is hard; keep simple
+        return text, reply, hist, audio_path, html, None
+    except Exception as e:
+        return "", f"Error: {e}", format_history(), None, "", None
 
-function clearChat() {{
-  fetch('/api/clear', {{
-    method:'POST',
-    headers:{{'Content-Type':'application/json'}},
-    body: JSON.stringify({{session_id: sessionId}})
-  }}).then(r=>r.json()).then(d=>{{
-    document.getElementById('chat').innerText = d.history;
-  }});
-}}
 
-function loro() {{
-  document.getElementById('loroMsg').innerText =
-    'Loro is locked. It will open at Update 2.1.1. Current update is {VERSION}.';
-}}
-</script>
-</body>
-</html>
+def process_image(prompt, voice):
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return "Please enter an image prompt.", None, None
+    url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?width=768&height=768&nologo=true"
+    audio = run_async(speak("Your image is ready.", voice or "female"))
+    return f"Image generated for: {prompt}", url, audio
+
+
+def clear_chat():
+    global chat_history
+    chat_history = []
+    return "", "Chat cleared.", None, "", None
+
+
+def loro():
+    return f"🔒 Loro is locked. It will open in **Update 2.1.1**. Current update is **{VERSION}**."
+
+
+css = """
+.gradio-container {max-width:100% !important; background:#0b0b0f !important; color:#eee !important;}
+footer {display:none !important;}
+button.primary {background:linear-gradient(135deg,#d4af37,#f0d789) !important; color:#111 !important; font-weight:700 !important;}
 """
 
+with gr.Blocks(title=f"Lova AI v{VERSION}", css=css, theme=gr.themes.Base()) as demo:
+    voice_state = gr.State("female")
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return HTML_PAGE
+    with gr.Column(visible=True) as gate:
+        gr.HTML(f"""
+        <div style='text-align:center;padding:40px 16px'>
+          <h1 style='color:#d4af37;letter-spacing:4px;margin:0'>LOVA</h1>
+          <p style='color:#999'>Premium Voice AI · Update {VERSION}</p>
+          <p style='color:#bbb'>Enter your Name Tag to continue</p>
+        </div>
+        """)
+        name_in = gr.Textbox(label="Name Tag", placeholder="Your name")
+        voice_in = gr.Radio(["female", "male"], value="female", label="Voice")
+        login_btn = gr.Button("Enter Lova", variant="primary")
+        gate_status = gr.Markdown("")
 
+    with gr.Column(visible=False) as main:
+        gr.HTML(f"""
+        <div style='display:flex;justify-content:space-between;align-items:center;
+             padding:12px 14px;border:1px solid rgba(212,175,55,.35);border-radius:12px;margin-bottom:12px'>
+          <div><b style='color:#d4af37;letter-spacing:2px'>LOVA</b><div style='color:#888;font-size:12px'>Update {VERSION}</div></div>
+          <div style='color:#d4af37'>v{VERSION}</div>
+        </div>
+        """)
+        status = gr.Markdown("Welcome")
 
-@app.post("/api/login")
-async def login(data: dict):
-    sid = data.get("session_id")
-    name = (data.get("name") or "").strip()
-    voice = data.get("voice") or "female"
-    if not sid or not name:
-        return JSONResponse({"ok": False, "message": "Name tag required"}, status_code=400)
-    SESSIONS[sid] = {"name": name, "voice": voice, "history": []}
-    return {"ok": True, "message": f"Welcome, {name}. Lova v{VERSION} is ready."}
+        with gr.Tab("🎤 Voice"):
+            gr.Markdown("### Voice mode\nRecord → press **Send**")
+            audio_in = gr.Audio(sources=["microphone"], type="numpy", format="wav", label="Microphone")
+            heard = gr.Textbox(label="You said", interactive=False)
+            v_btn = gr.Button("Send", variant="primary")
 
+        with gr.Tab("💬 Chat"):
+            gr.Markdown("### Chat mode")
+            text_in = gr.Textbox(label="Message", lines=3, placeholder="Type here... (or: open Grok / generate image of a cat)")
+            t_btn = gr.Button("Send", variant="primary")
 
-@app.post("/api/chat")
-async def chat(data: dict):
-    sid = data.get("session_id")
-    message = (data.get("message") or "").strip()
-    sess = SESSIONS.get(sid)
-    if not sess:
-        return JSONResponse({"error": "Login first"}, status_code=401)
-    if not message:
-        return JSONResponse({"error": "Empty message"}, status_code=400)
+        with gr.Tab("🖼️ Image"):
+            gr.Markdown("### Image mode")
+            img_prompt = gr.Textbox(label="Describe image", placeholder="a golden robot in a luxury room")
+            i_btn = gr.Button("Generate Image", variant="primary")
 
-    reply = ask_llm(message, sess["history"], sess["name"])
-    sess["history"].append({"role": "user", "content": message})
-    sess["history"].append({"role": "assistant", "content": reply})
+        history = gr.Markdown("No messages yet.")
+        reply = gr.Textbox(label="Lova", lines=5)
+        audio_out = gr.Audio(label="Voice reply", autoplay=True)
+        open_html = gr.HTML()
+        image_out = gr.Image(label="Generated image")
+        clear_btn = gr.Button("Clear chat")
+        loro_btn = gr.Button("🔒 Loro (Locked)")
+        loro_msg = gr.Markdown(f"Current update: **{VERSION}**")
 
-    audio_path = await tts(reply, sess.get("voice", "female"))
-    audio_url = None
-    if audio_path:
-        # expose temp file once
-        token = os.path.basename(audio_path)
-        SESSIONS.setdefault("_audio", {})[token] = audio_path
-        audio_url = f"/api/audio/{token}"
-
-    hist = "\n\n".join(
-        [("You: " if m["role"] == "user" else "Lova: ") + m["content"] for m in sess["history"][-12:]]
-    )
-    return {"reply": reply, "history": hist, "audio_url": audio_url}
-
-
-@app.get("/api/audio/{token}")
-async def audio(token: str):
-    path = SESSIONS.get("_audio", {}).get(token)
-    if not path or not os.path.exists(path):
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(path, media_type="audio/mpeg")
-
-
-@app.post("/api/clear")
-async def clear(data: dict):
-    sid = data.get("session_id")
-    sess = SESSIONS.get(sid)
-    if sess:
-        sess["history"] = []
-    return {"history": "No messages yet."}
-
+    login_btn.click(login, [name_in, voice_in], [gate, main, status, voice_state])
+    t_btn.click(process_text, [text_in, voice_state], [reply, history, audio_out, open_html, image_out])
+    text_in.submit(process_text, [text_in, voice_state], [reply, history, audio_out, open_html, image_out])
+    v_btn.click(process_voice, [audio_in, voice_state], [heard, reply, history, audio_out, open_html, image_out])
+    i_btn.click(process_image, [img_prompt, voice_state], [reply, image_out, audio_out])
+    clear_btn.click(clear_chat, outputs=[reply, history, audio_out, open_html, image_out])
+    loro_btn.click(loro, outputs=loro_msg)
 
 if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 7860))
+    demo.launch(server_name="0.0.0.0", server_port=port)
